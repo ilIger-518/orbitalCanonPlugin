@@ -174,10 +174,16 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
                 // spawn high-altitude beam and circle effect
                 Location top = strikeLoc.clone().add(0, 30, 0);
 
-                // beam effect
-                for (double y = top.getY(); y >= strikeLoc.getY(); y -= 0.5) {
-                    Location beamLoc = new Location(world, strikeLoc.getX(), y, strikeLoc.getZ());
-                    world.spawnParticle(Particle.END_ROD, beamLoc, 1, 0, 0, 0, 0);
+                // beam effect (5-block wide cylinder)
+                double beamRadius = 2.5;
+                for (double y = top.getY(); y >= strikeLoc.getY(); y -= 0.3) {
+                    for (double angle = 0; angle < 2 * Math.PI; angle += Math.PI / 8) {
+                        double x = Math.cos(angle) * beamRadius;
+                        double z = Math.sin(angle) * beamRadius;
+                        Location beamLoc = new Location(world, strikeLoc.getX() + x, y, strikeLoc.getZ() + z);
+                        world.spawnParticle(Particle.SOUL_FIRE_FLAME, beamLoc, 2, 0, 0, 0, 0);
+                        world.spawnParticle(Particle.END_ROD, beamLoc, 1, 0, 0, 0, 0);
+                    }
                 }
 
                 // circle effect on ground
@@ -200,6 +206,19 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
                         // final impact: explosion with block damage enabled
                         // (power, setFire, breakBlocks)
                         world.createExplosion(strikeLoc, EXPLOSION_POWER, false, true);
+
+                        // randomly set some nearby blocks on fire (about half)
+                        int fireRadius = 3;
+                        for (int dx = -fireRadius; dx <= fireRadius; dx++) {
+                            for (int dz = -fireRadius; dz <= fireRadius; dz++) {
+                                if (Math.random() < 0.5) {
+                                    Location fireLoc = strikeLoc.clone().add(dx, 0, dz);
+                                    if (world.getBlockAt(fireLoc).getType().isAir() && world.getBlockAt(fireLoc.clone().add(0, -1, 0)).getType().isSolid()) {
+                                        world.getBlockAt(fireLoc).setType(Material.FIRE);
+                                    }
+                                }
+                            }
+                        }
 
                         // additional visual
                         world.spawnParticle(Particle.EXPLOSION, strikeLoc, 1);
