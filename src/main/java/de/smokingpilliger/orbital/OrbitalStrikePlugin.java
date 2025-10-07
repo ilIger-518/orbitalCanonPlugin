@@ -8,7 +8,6 @@ import org.bukkit.Sound;
 import org.bukkit.SoundCategory;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.enchantments.Enchantment;
-import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Snowball;
 import org.bukkit.event.EventHandler;
@@ -24,6 +23,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.Material;
 import org.bukkit.World;
+import org.bukkit.block.data.BlockData;
 
 import java.util.*;
 
@@ -32,7 +32,7 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
     private NamespacedKey cannonKey;
     private NamespacedKey projectileKey;
     // cooldown in milliseconds
-    private final long COOLDOWN_MS = 5000;
+    private final long COOLDOWN_MS = 500;
     private final Map<UUID, Long> cooldowns = new HashMap<>();
 
     @Override
@@ -50,7 +50,7 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
 
             Player p = (Player) sender;
             if (!p.hasPermission("orbitalstrike.give") && !p.isOp()) {
-                p.sendMessage("You don't have permission.");
+                p.sendMessage("You don't have permission.Fuck you.");
                 return true;
             }
 
@@ -171,67 +171,35 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
                 double ox = (Math.random() - 0.5) * RADIUS;
                 double oz = (Math.random() - 0.5) * RADIUS;
                 Location strikeLoc = hitLoc.clone().add(ox, 0, oz);
-                // spawn high-altitude beam and circle effect
-                Location top = strikeLoc.clone().add(0, 30, 0);
+                World w = world;
 
-                // beam effect (thicker beacon-style column)
-                double beamRadius = 3.5; // wider beam
-                double baseY = strikeLoc.getY();
+                // Who should see the fake beam? everyone in the world (adjust if needed)
+                List<Player> viewers = new ArrayList<>(w.getPlayers());
 
-// Place ONE beacon at ground center (optional)
-                {
-                    Location center = strikeLoc.clone();
-                    center.setY(baseY);
-                    world.getBlockAt(center).setType(Material.BEACON);
+                // Beam lifetime (5 seconds)
+                final int BEAM_TICKS = 20 * 5;
 
-                    // 3×3 iron base underneath
-                    for (int bx = -1; bx <= 1; bx++) {
-                        for (int bz = -1; bz <= 1; bz++) {
-                            world.getBlockAt(center.clone().add(bx, -1, bz)).setType(Material.IRON_BLOCK);
-                        }
-                    }
-                }
+                // How high to clear for the beam (cap to world max)
+                final int topY = Math.min(w.getMaxHeight() - 1, strikeLoc.getBlockY() + 256);
 
-                // Particle “beam” (no mass block placement)
-                top = strikeLoc.clone().add(0, 30, 0);
-                for (double y = top.getY(); y >= baseY; y -= 0.3) {
-                    for (double angle = 0; angle < 2 * Math.PI; angle += Math.PI / 16) {
-                        double offX = Math.cos(angle) * beamRadius;
-                        double offZ = Math.sin(angle) * beamRadius;
+                // Save originals so we can revert for all viewers
+                Map<Location, BlockData> saved = new HashMap<>();
 
-                        // IMPORTANT: offset by strikeLoc!
-                        double worldX = strikeLoc.getX() + offX;
-                        double worldZ = strikeLoc.getZ() + offZ;
+                // 1) Show fake beacon beam (client-side only)
+                showFakeBeaconBeam(strikeLoc, topY, viewers, saved);
 
-                        world.spawnParticle(
-                                Particle.END_ROD,
-                                new Location(world, worldX, y, worldZ),
-                                1, 0, 0, 0, 0
-                        );
-                    }
-                }
+                // cue
+                w.playSound(strikeLoc, Sound.BLOCK_BEACON_POWER_SELECT, SoundCategory.BLOCKS, 2.0f, 1.5f);
 
-
-                // circle effect on ground
-                int points = 40;
-                double radius = 3.0;
-                for (int j = 0; j < points; j++) {
-                    double angle = 2 * Math.PI * j / points;
-                    double x = Math.cos(angle) * radius;
-                    double z = Math.sin(angle) * radius;
-                    Location circleLoc = strikeLoc.clone().add(x, 0.1, z);
-                    world.spawnParticle(Particle.SOUL_FIRE_FLAME, circleLoc, 1, 0, 0, 0, 0);
-                }
-
-                world.playSound(strikeLoc, Sound.BLOCK_BEACON_POWER_SELECT, SoundCategory.BLOCKS, 2.0f, 1.5f);
-
-                // small delay before explosion "impact" particle drop
+                // 2) After 5s: revert & huge impact
                 new BukkitRunnable() {
                     @Override
                     public void run() {
-                        // final impact: explosion with block damage enabled
-                        // (power, setFire, breakBlocks)
-                        world.createExplosion(strikeLoc, EXPLOSION_POWER, false, true);
+                        // Revert client-side changes
+                        revertClientBlocks(viewers, saved);
+
+                        // Big impact (with block damage)
+                        w.createExplosion(strikeLoc, EXPLOSION_POWER, false, true);
 
                         // randomly set some nearby blocks on fire (about half)
                         int fireRadius = 3;
@@ -239,19 +207,58 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
                             for (int dz = -fireRadius; dz <= fireRadius; dz++) {
                                 if (Math.random() < 0.5) {
                                     Location fireLoc = strikeLoc.clone().add(dx, 0, dz);
-                                    if (world.getBlockAt(fireLoc).getType().isAir() && world.getBlockAt(fireLoc.clone().add(0, -1, 0)).getType().isSolid()) {
-                                        world.getBlockAt(fireLoc).setType(Material.FIRE);
+                                    if (w.getBlockAt(fireLoc).getType().isAir() && w.getBlockAt(fireLoc.clone().add(0, -1, 0)).getType().isSolid()) {
+                                        w.getBlockAt(fireLoc).setType(Material.FIRE);
                                     }
                                 }
                             }
                         }
 
-                        // additional visual
-                        world.spawnParticle(Particle.EXPLOSION, strikeLoc, 1);
-                        world.playSound(strikeLoc, Sound.ENTITY_GENERIC_EXPLODE, SoundCategory.BLOCKS, 4f, 1f);
+                        // additional visual + audio
+                        w.spawnParticle(Particle.EXPLOSION, strikeLoc, 1);
+                        w.playSound(strikeLoc, Sound.ENTITY_GENERIC_EXPLODE, SoundCategory.BLOCKS, 4f, 1f);
                     }
-                }.runTaskLater(this, 2L + index); // tiny stagger
+                }.runTaskLater(this, BEAM_TICKS);
+
             }, i * TICKS_BETWEEN);
         }
+    }
+
+    // === Helpers to show/revert the client-side beacon beam ===
+
+    private void showFakeBeaconBeam(Location base, int topY,
+                                    Collection<Player> viewers,
+                                    Map<Location, BlockData> saved) {
+        World w = base.getWorld();
+        if (w == null) return;
+
+        int bx = base.getBlockX();
+        int by = base.getBlockY();
+        int bz = base.getBlockZ();
+
+        // Base block as BEACON (client-side)
+        Location baseLoc = new Location(w, bx, by, bz);
+        saved.put(baseLoc, w.getBlockAt(bx, by, bz).getBlockData());
+        BlockData beaconData = Material.BEACON.createBlockData();
+        for (Player p : viewers) p.sendBlockChange(baseLoc, beaconData);
+
+        // Clear vertical column above to AIR (client-side) so the beam renders
+        for (int y = by + 1; y <= topY; y++) {
+            Location col = new Location(w, bx, y, bz);
+            if (!saved.containsKey(col)) {
+                saved.put(col, w.getBlockAt(bx, y, bz).getBlockData());
+            }
+            for (Player p : viewers) p.sendBlockChange(col, Material.AIR.createBlockData());
+        }
+    }
+
+    private void revertClientBlocks(Collection<Player> viewers,
+                                    Map<Location, BlockData> saved) {
+        for (Map.Entry<Location, BlockData> e : saved.entrySet()) {
+            Location loc = e.getKey();
+            BlockData data = e.getValue();
+            for (Player p : viewers) p.sendBlockChange(loc, data);
+        }
+        saved.clear();
     }
 }
