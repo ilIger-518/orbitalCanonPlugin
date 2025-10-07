@@ -174,15 +174,14 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
                 // spawn high-altitude beam and circle effect
                 Location top = strikeLoc.clone().add(0, 30, 0);
 
-                // beam effect (5-block wide cylinder)
-                double beamRadius = 2.5;
+                // beam effect (thicker beacon-style column)
+                double beamRadius = 3.5; // wider beam
                 for (double y = top.getY(); y >= strikeLoc.getY(); y -= 0.3) {
-                    for (double angle = 0; angle < 2 * Math.PI; angle += Math.PI / 8) {
+                    for (double angle = 0; angle < 2 * Math.PI; angle += Math.PI / 16) {
                         double x = Math.cos(angle) * beamRadius;
                         double z = Math.sin(angle) * beamRadius;
                         Location beamLoc = new Location(world, strikeLoc.getX() + x, y, strikeLoc.getZ() + z);
-                        world.spawnParticle(Particle.SOUL_FIRE_FLAME, beamLoc, 2, 0, 0, 0, 0);
-                        world.spawnParticle(Particle.END_ROD, beamLoc, 1, 0, 0, 0, 0);
+                        world.spawnParticle(Particle.DRAGON_BREATH, beamLoc, 3, 0.2, 0.2, 0.2, 0);
                     }
                 }
 
