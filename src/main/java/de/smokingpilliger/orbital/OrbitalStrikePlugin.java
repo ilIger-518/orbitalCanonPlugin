@@ -154,7 +154,7 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
         sb.remove();
 
         // Number of strikes and timing - defaults
-        final int STRIKES = 4;      // how many concentrated explosions
+        final int STRIKES = 2;      // how many concentrated explosions
         final int TICKS_BETWEEN = 8; // ticks between strikes (8 ticks = 0.4s)
         final double RADIUS = 1.5;   // spread radius for multi-strike pattern
         final float EXPLOSION_POWER = 15.0f; // explosion strength
@@ -176,23 +176,41 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
 
                 // beam effect (thicker beacon-style column)
                 double beamRadius = 3.5; // wider beam
-                for (double y = top.getY(); y >= strikeLoc.getY(); y -= 0.3) {
-                    for (double angle = 0; angle < 2 * Math.PI; angle += Math.PI / 16) {
-                        double x = Math.cos(angle) * beamRadius;
-                        double z = Math.sin(angle) * beamRadius;
-                        // Place a beacon
-                        Location beaconLoc = new Location(world, x, y, z);
-                        world.getBlockAt(beaconLoc).setType(Material.BEACON);
+                double baseY = strikeLoc.getY();
 
-                        // Example: create a simple 3×3 iron base underneath
-                        for (int bx = -1; bx <= 1; bx++) {
-                            for (int bz = -1; bz <= 1; bz++) {
-                                world.getBlockAt(beaconLoc.clone().add(bx, -1, bz))
-                                        .setType(Material.IRON_BLOCK);
-                            }
+// Place ONE beacon at ground center (optional)
+                {
+                    Location center = strikeLoc.clone();
+                    center.setY(baseY);
+                    world.getBlockAt(center).setType(Material.BEACON);
+
+                    // 3×3 iron base underneath
+                    for (int bx = -1; bx <= 1; bx++) {
+                        for (int bz = -1; bz <= 1; bz++) {
+                            world.getBlockAt(center.clone().add(bx, -1, bz)).setType(Material.IRON_BLOCK);
                         }
                     }
                 }
+
+                // Particle “beam” (no mass block placement)
+                top = strikeLoc.clone().add(0, 30, 0);
+                for (double y = top.getY(); y >= baseY; y -= 0.3) {
+                    for (double angle = 0; angle < 2 * Math.PI; angle += Math.PI / 16) {
+                        double offX = Math.cos(angle) * beamRadius;
+                        double offZ = Math.sin(angle) * beamRadius;
+
+                        // IMPORTANT: offset by strikeLoc!
+                        double worldX = strikeLoc.getX() + offX;
+                        double worldZ = strikeLoc.getZ() + offZ;
+
+                        world.spawnParticle(
+                                Particle.END_ROD,
+                                new Location(world, worldX, y, worldZ),
+                                1, 0, 0, 0, 0
+                        );
+                    }
+                }
+
 
                 // circle effect on ground
                 int points = 40;
