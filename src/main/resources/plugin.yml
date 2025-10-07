@@ -1,0 +1,15 @@
+name: OrbitalStrike
+main: de.smokingpilliger.orbital.OrbitalStrikePlugin
+version: 1.0
+api-version: 1.21
+commands:
+  orbitalgun:
+    description: Gives you the Orbital Strike Cannon.
+    usage: /orbitalgun
+permissions:
+  orbitalstrike.use:
+    description: Use the Orbital Strike Cannon
+    default: op
+  orbitalstrike.give:
+    description: Receive the Orbital Strike Cannon
+    default: op
