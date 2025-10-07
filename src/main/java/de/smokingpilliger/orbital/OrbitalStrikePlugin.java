@@ -180,8 +180,17 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
                     for (double angle = 0; angle < 2 * Math.PI; angle += Math.PI / 16) {
                         double x = Math.cos(angle) * beamRadius;
                         double z = Math.sin(angle) * beamRadius;
-                        Location beamLoc = new Location(world, strikeLoc.getX() + x, y, strikeLoc.getZ() + z);
-                        world.spawnParticle(Particle.DRAGON_BREATH, beamLoc, 3, 0.2, 0.2, 0.2, 0);
+                        // Place a beacon
+                        Location beaconLoc = new Location(world, x, y, z);
+                        world.getBlockAt(beaconLoc).setType(Material.BEACON);
+
+                        // Example: create a simple 3×3 iron base underneath
+                        for (int bx = -1; bx <= 1; bx++) {
+                            for (int bz = -1; bz <= 1; bz++) {
+                                world.getBlockAt(beaconLoc.clone().add(bx, -1, bz))
+                                        .setType(Material.IRON_BLOCK);
+                            }
+                        }
                     }
                 }
 
