@@ -6,8 +6,9 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.SoundCategory;
-import org.bukkit.attribute.Attribute;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.BlockDisplay;
+import org.bukkit.entity.Display;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Snowball;
 import org.bukkit.event.EventHandler;
@@ -20,10 +21,14 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.data.BlockData;
+import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.util.Transformation;
+
+import org.joml.AxisAngle4f;
+import org.joml.Vector3f;
 
 import java.util.*;
 
@@ -34,6 +39,11 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
     // cooldown in milliseconds
     private final long COOLDOWN_MS = 500;
     private final Map<UUID, Long> cooldowns = new HashMap<>();
+
+    // === Beam config ===
+    private static final int   BEAM_DURATION_TICKS = 20 * 5; // 5 seconds
+    private static final double BEAM_RADIUS_BLOCKS = 4.0;    // requested radius
+    private static final Material BEAM_MATERIAL = Material.BLUE_STAINED_GLASS; // translucent blue
 
     @Override
     public void onEnable() {
@@ -50,7 +60,7 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
 
             Player p = (Player) sender;
             if (!p.hasPermission("orbitalstrike.give") && !p.isOp()) {
-                p.sendMessage("You don't have permission.Fuck you.");
+                p.sendMessage("You don't have permission.");
                 return true;
             }
 
@@ -133,7 +143,7 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
         PersistentDataContainer pdc = sb.getPersistentDataContainer();
         pdc.set(projectileKey, PersistentDataType.STRING, player.getUniqueId().toString());
 
-        // small visual + sound when firing
+        // small visual + sound when firing (still fine to keep a tiny spark)
         player.getWorld().spawnParticle(Particle.CRIT, player.getEyeLocation().add(player.getLocation().getDirection().multiply(1)), 8, 0.2, 0.2, 0.2, 0.05);
         player.playSound(player.getLocation(), Sound.ENTITY_FIREWORK_ROCKET_LARGE_BLAST, SoundCategory.PLAYERS, 1f, 1f);
     }
@@ -154,7 +164,7 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
         sb.remove();
 
         // Number of strikes and timing - defaults
-        final int STRIKES = 2;      // how many concentrated explosions
+        final int STRIKES = 2;       // how many concentrated explosions
         final int TICKS_BETWEEN = 8; // ticks between strikes (8 ticks = 0.4s)
         final double RADIUS = 1.5;   // spread radius for multi-strike pattern
         final float EXPLOSION_POWER = 15.0f; // explosion strength
@@ -173,30 +183,22 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
                 Location strikeLoc = hitLoc.clone().add(ox, 0, oz);
                 World w = world;
 
-                // Who should see the fake beam? everyone in the world (adjust if needed)
-                List<Player> viewers = new ArrayList<>(w.getPlayers());
-
-                // Beam lifetime (5 seconds)
-                final int BEAM_TICKS = 20 * 5;
-
-                // How high to clear for the beam (cap to world max)
+                // Beam lifetime (5 seconds, same as BEAM_DURATION_TICKS)
                 final int topY = Math.min(w.getMaxHeight() - 1, strikeLoc.getBlockY() + 256);
 
-                // Save originals so we can revert for all viewers
-                Map<Location, BlockData> saved = new HashMap<>();
-
-                // 1) Show fake beacon beam (client-side only)
-                showFakeBeaconBeam(strikeLoc, topY, viewers, saved);
+                // 1) Spawn our custom blue beam (display entity)
+                BlockDisplay beam = spawnCustomBeam(strikeLoc, topY, BEAM_RADIUS_BLOCKS, BEAM_MATERIAL);
 
                 // cue
-                w.playSound(strikeLoc, Sound.BLOCK_BEACON_POWER_SELECT, SoundCategory.BLOCKS, 2.0f, 1.5f);
+                w.playSound(strikeLoc, Sound.BLOCK_BEACON_POWER_SELECT, SoundCategory.BLOCKS, 2.0f, 1.2f);
 
-                // 2) After 5s: revert & huge impact
+                // 2) After life: remove beam & big impact
                 new BukkitRunnable() {
                     @Override
                     public void run() {
-                        // Revert client-side changes
-                        revertClientBlocks(viewers, saved);
+                        if (beam != null && !beam.isDead()) {
+                            beam.remove();
+                        }
 
                         // Big impact (with block damage)
                         w.createExplosion(strikeLoc, EXPLOSION_POWER, false, true);
@@ -218,47 +220,69 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
                         w.spawnParticle(Particle.EXPLOSION, strikeLoc, 1);
                         w.playSound(strikeLoc, Sound.ENTITY_GENERIC_EXPLODE, SoundCategory.BLOCKS, 4f, 1f);
                     }
-                }.runTaskLater(this, BEAM_TICKS);
+                }.runTaskLater(this, BEAM_DURATION_TICKS);
 
             }, i * TICKS_BETWEEN);
         }
     }
 
-    // === Helpers to show/revert the client-side beacon beam ===
+    // === Custom beam implementation (no particles, no real beacons) ===
+    // Uses a single BlockDisplay stretched into a tall translucent column.
 
-    private void showFakeBeaconBeam(Location base, int topY,
-                                    Collection<Player> viewers,
-                                    Map<Location, BlockData> saved) {
+    /**
+     * Spawns a tall blue beam using a BlockDisplay scaled to the desired radius and height.
+     * @param base The base (x,z from this, y is ground level)
+     * @param topY The Y to reach (usually near build height)
+     * @param radiusBlocks Radius in blocks (X/Z)
+     * @param material Translucent material (e.g., BLUE_STAINED_GLASS)
+     * @return The spawned BlockDisplay entity
+     */
+    private BlockDisplay spawnCustomBeam(Location base, int topY, double radiusBlocks, Material material) {
         World w = base.getWorld();
-        if (w == null) return;
+        if (w == null) return null;
 
-        int bx = base.getBlockX();
         int by = base.getBlockY();
-        int bz = base.getBlockZ();
+        double height = Math.max(1.0, (topY - by + 1));
+        double diameter = radiusBlocks * 2.0;
 
-        // Base block as BEACON (client-side)
-        Location baseLoc = new Location(w, bx, by, bz);
-        saved.put(baseLoc, w.getBlockAt(bx, by, bz).getBlockData());
-        BlockData beaconData = Material.BEACON.createBlockData();
-        for (Player p : viewers) p.sendBlockChange(baseLoc, beaconData);
+        // Spawn at the center of the target block; we'll scale & translate it up.
+        Location spawnLoc = base.clone().add(0.5, 0, 0.5);
 
-        // Clear vertical column above to AIR (client-side) so the beam renders
-        for (int y = by + 1; y <= topY; y++) {
-            Location col = new Location(w, bx, y, bz);
-            if (!saved.containsKey(col)) {
-                saved.put(col, w.getBlockAt(bx, y, bz).getBlockData());
-            }
-            for (Player p : viewers) p.sendBlockChange(col, Material.AIR.createBlockData());
-        }
-    }
+        BlockData data = material.createBlockData();
+        BlockDisplay display = w.spawn(spawnLoc, BlockDisplay.class, d -> {
+            d.setBlock(data);
 
-    private void revertClientBlocks(Collection<Player> viewers,
-                                    Map<Location, BlockData> saved) {
-        for (Map.Entry<Location, BlockData> e : saved.entrySet()) {
-            Location loc = e.getKey();
-            BlockData data = e.getValue();
-            for (Player p : viewers) p.sendBlockChange(loc, data);
-        }
-        saved.clear();
+            // Keep it bright and visible
+            d.setBrightness(new Display.Brightness(15, 15)); // max
+            d.setGlowing(false); // beam is bright enough; toggle to true if you want outline
+
+            // View range so players can see it from far away
+            d.setViewRange(128.0f);
+            d.setShadowRadius(0f);
+            d.setShadowStrength(0f);
+            d.setTeleportDuration(1); // smooth spawn
+
+            // Build a transformation that scales the 1x1x1 "block cube" into a tall column,
+            // then lifts it up by half its height so it starts at ground level.
+            Vector3f scale = new Vector3f((float) diameter, (float) height, (float) diameter);
+            // translation is *local* to the display; lift by half the height
+            Vector3f translation = new Vector3f(0f, (float) (height / 2.0), 0f);
+
+            Transformation t = new Transformation(
+                    translation,
+                    new AxisAngle4f(0f, 0f, 0f, 1f),
+                    scale,
+                    new AxisAngle4f(0f, 0f, 0f, 1f)
+            );
+            d.setTransformation(t);
+
+            // Slight fade in/out for polish (optional; safe defaults if unsupported)
+            try {
+                d.setInterpolationDelay(0);
+                d.setInterpolationDuration(5);
+            } catch (NoSuchMethodError ignored) {}
+        });
+
+        return display;
     }
 }
