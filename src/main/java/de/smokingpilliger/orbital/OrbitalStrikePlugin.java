@@ -1,71 +1,103 @@
 package de.smokingpilliger.orbital;
 
 import org.bukkit.Bukkit;
+import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.SoundCategory;
+import org.bukkit.World;
 import org.bukkit.enchantments.Enchantment;
-import org.bukkit.entity.BlockDisplay;
-import org.bukkit.entity.Display;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.FallingBlock;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
-import org.bukkit.entity.Snowball;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
 import org.bukkit.event.player.PlayerInteractEvent;
-import org.bukkit.event.entity.ProjectileHitEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.Material;
-import org.bukkit.World;
-import org.bukkit.block.data.BlockData;
 import org.bukkit.scheduler.BukkitRunnable;
-import org.bukkit.util.Transformation;
-
-import org.joml.AxisAngle4f;
-import org.joml.Vector3f;
+import org.bukkit.util.RayTraceResult;
+import org.bukkit.util.Vector;
+import org.bukkit.ChatColor;
+import net.md_5.bungee.api.chat.TextComponent;
 
 import java.util.*;
 
 public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
 
-    private NamespacedKey cannonKey;
-    private NamespacedKey projectileKey;
-    // cooldown in milliseconds
-    private final long COOLDOWN_MS = 500;
-    private final Map<UUID, Long> cooldowns = new HashMap<>();
+    // === Item & tagging ===
+    private NamespacedKey gunKey;
 
-    // === Beam config ===
-    private static final int   BEAM_DURATION_TICKS = 20 * 5;
-    private static final double BEAM_RADIUS_BLOCKS = 4.0;
-    private static final Material BEAM_MATERIAL = Material.LIGHT_BLUE_STAINED_GLASS;
+    // === Cooldowns (ms) ===
+    private final Map<UUID, Long> cooldowns = new HashMap<>();
+    private static final long COOLDOWN_MS = 2000L; // 2 seconds between shots
+
+    // === Per-player settings (GUI-adjustable) ===
+    private final Map<UUID, Integer> strikesSetting = new HashMap<>();
+    private final Map<UUID, Boolean> blockDamageSetting = new HashMap<>();
+    private final Map<UUID, Float> explosionPowerSetting = new HashMap<>();
+
+
+    // === Targeting / strike tuning ===
+    private static final double MAX_DISTANCE = 300.0; // meters to ray-trace
+    private static final double FALL_HEIGHT_ABOVE_MAX = 120.0; // meters above world max height to spawn projectiles
+    private static final int    STRIKES = 6;           // number of projectiles per shot
+    private static final double STRIKE_SPREAD = 2.5;   // horizontal spread near target
+    private static final int    BASE_DELAY_TICKS = 20; // base wait before first impact
+    private static final float  EXPLOSION_POWER = 4.0f; // ~TNT strength
+    private static final boolean BLOCK_DAMAGE = false; // change to true if you want craters
+    private static final boolean SET_FIRE = false;     // explosions set fire?
+    private static final boolean DAMAGE_ENTITIES = true;
+    private static final double  DAMAGE_RADIUS = 6.0;
+    private static final double  PROJECTILE_SPEED = 1.25; // blocks/tick-ish initial impulse
+
+    private static final int STRIKES_DEFAULT = STRIKES; // 6
+    private static final boolean BLOCK_DAMAGE_DEFAULT = BLOCK_DAMAGE; // false
+    private static final float EXPLOSION_POWER_DEFAULT = EXPLOSION_POWER; // 4.0f
+
+    // Visuals
+    private static final Material PROJECTILE_MATERIAL = Material.BLACK_CONCRETE;
 
     @Override
     public void onEnable() {
-        cannonKey = new NamespacedKey(this, "orbital_cannon");
-        projectileKey = new NamespacedKey(this, "orbital_projectile");
+        gunKey = new NamespacedKey(this, "orbital_gun_item");
         getServer().getPluginManager().registerEvents(this, this);
 
-        // register simple command to give the item
-        Objects.requireNonNull(this.getCommand("orbitalgun")).setExecutor((sender, command, label, args) -> {
-            if (!(sender instanceof Player)) {
-                sender.sendMessage("Only players can receive the Orbital Strike Cannon.");
+        // /orbitalgun give [player]
+        Objects.requireNonNull(getCommand("orbitalgun")).setExecutor((sender, command, label, args) -> {
+            Player target;
+            if (args.length >= 1) {
+                target = Bukkit.getPlayerExact(args[0]);
+                if (target == null) {
+                    sender.sendMessage("Player not found.");
+                    return true;
+                }
+            } else {
+                if (!(sender instanceof Player p)) {
+                    sender.sendMessage("Only players can receive the Orbital Rifle.");
+                    return true;
+                }
+                target = p;
+            }
+
+            if (!sender.hasPermission("orbitalgun.give") && !sender.isOp()) {
+                sender.sendMessage("You don't have permission.");
                 return true;
             }
 
-            Player p = (Player) sender;
-            if (!p.hasPermission("orbitalstrike.give") && !p.isOp()) {
-                p.sendMessage("You don't have permission.");
-                return true;
-            }
-
-            p.getInventory().addItem(createOrbitalCannon());
-            p.sendMessage("You received the Orbital Strike Cannon.");
+            target.getInventory().addItem(createOrbitalGun());
+            sender.sendMessage("Gave Orbital Rifle to " + target.getName());
             return true;
         });
 
@@ -77,213 +109,305 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
         getLogger().info("OrbitalStrikePlugin disabled.");
     }
 
-    private ItemStack createOrbitalCannon() {
-        ItemStack item = new ItemStack(Material.NETHER_STAR);
+    // === Item creation / checks ===
+
+    private ItemStack createOrbitalGun() {
+        ItemStack item = new ItemStack(Material.NETHERITE_HOE);
         ItemMeta meta = item.getItemMeta();
         if (meta == null) return item;
-        meta.setDisplayName("§cOrbital Strike Cannon");
-        List<String> lore = new ArrayList<>();
-        lore.add("§7Right-click to fire an orbital strike projectile.");
-        lore.add("§7Explosions on impact. Use with caution.");
-        meta.setLore(lore);
-        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
-        meta.addEnchant(Enchantment.LOYALTY, 1, true); // purely cosmetic enchant look
-        // persistent tag
-        PersistentDataContainer pdc = meta.getPersistentDataContainer();
-        pdc.set(cannonKey, PersistentDataType.BYTE, (byte)1);
 
+        meta.setDisplayName("§rOrbital Rifle");
+        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES, ItemFlag.HIDE_ENCHANTS);
+        meta.addEnchant(Enchantment.UNBREAKING, 1, true); // subtle cosmetic glint
+        // If you use a resource pack with CustomModelData, set it here:
+        meta.setCustomModelData(1234567);
+
+        // Tag the item so only this item fires strikes
+        meta.getPersistentDataContainer().set(gunKey, PersistentDataType.BYTE, (byte) 1);
         item.setItemMeta(meta);
         return item;
     }
 
-    private boolean isOrbitalCannon(ItemStack item) {
+    private boolean isOrbitalGun(ItemStack item) {
         if (item == null || !item.hasItemMeta()) return false;
-        ItemMeta meta = item.getItemMeta();
-        PersistentDataContainer pdc = meta.getPersistentDataContainer();
-        Byte val = pdc.get(cannonKey, PersistentDataType.BYTE);
-        return val != null && val == (byte)1;
+        Byte tag = item.getItemMeta().getPersistentDataContainer().get(gunKey, PersistentDataType.BYTE);
+        return tag != null && tag == (byte) 1;
     }
 
+    // === Interaction handler ===
+
     @EventHandler
-    public void onPlayerUse(PlayerInteractEvent event) {
-        if (event.getItem() == null) return;
-        if (!isOrbitalCannon(event.getItem())) return;
+    public void onUse(PlayerInteractEvent e) {
+        Action a = e.getAction();
+        if (a != Action.RIGHT_CLICK_AIR && a != Action.RIGHT_CLICK_BLOCK) return;
 
-        // only right clicks
-        switch (event.getAction()) {
-            case RIGHT_CLICK_AIR:
-            case RIGHT_CLICK_BLOCK:
-                break;
-            default:
-                return;
-        }
+        Player p = e.getPlayer();
+        ItemStack inHand = p.getInventory().getItemInMainHand();
+        if (!isOrbitalGun(inHand)) return;
 
-        event.setCancelled(true); // prevent other interactions while using
+        e.setCancelled(true);
 
-        Player player = event.getPlayer();
-        // permission check
-        if (!player.hasPermission("orbitalstrike.use") && !player.isOp()) {
-            player.sendMessage("You don't have permission to use the Orbital Strike Cannon.");
+        if (!p.hasPermission("orbitalgun.use") && !p.isOp()) {
+            p.sendMessage("You don't have permission to use the Orbital Rifle.");
             return;
         }
 
-        // cooldown
+        // Sneak + right-click opens the rifle GUI instead of firing
+        if (p.isSneaking()) {
+            openRifleGui(p);
+            return;
+        }
+
         long now = System.currentTimeMillis();
-        Long last = cooldowns.get(player.getUniqueId());
-        if (last != null && now - last < COOLDOWN_MS) {
-            long remain = (COOLDOWN_MS - (now - last)) / 1000 + 1;
-            player.sendMessage("Orbital Cannon recharging... " + remain + "s");
+        long end = cooldowns.getOrDefault(p.getUniqueId(), 0L);
+        if (now < end) {
+            long remainMs = end - now;
+            p.spigot().sendMessage(
+                net.md_5.bungee.api.ChatMessageType.ACTION_BAR,
+                new TextComponent("Cooling down… " + Math.max(1, (remainMs + 999) / 1000) + "s")
+            );
             return;
         }
-        cooldowns.put(player.getUniqueId(), now);
+        cooldowns.put(p.getUniqueId(), now + COOLDOWN_MS);
 
-        // Launch a snowball as the "projectile"
-        Snowball sb = player.launchProjectile(Snowball.class);
-        // mark the projectile in PersistentDataContainer
-        PersistentDataContainer pdc = sb.getPersistentDataContainer();
-        pdc.set(projectileKey, PersistentDataType.STRING, player.getUniqueId().toString());
+        // Ray-trace where the player is aiming
+        Location eye = p.getEyeLocation();
+        Vector dir = eye.getDirection();
+        World w = p.getWorld();
 
-        // small visual + sound when firing (still fine to keep a tiny spark)
-        player.getWorld().spawnParticle(Particle.CRIT, player.getEyeLocation().add(player.getLocation().getDirection().multiply(1)), 8, 0.2, 0.2, 0.2, 0.05);
-        player.playSound(player.getLocation(), Sound.ENTITY_FIREWORK_ROCKET_LARGE_BLAST, SoundCategory.PLAYERS, 1f, 1f);
+        RayTraceResult hit = w.rayTrace(eye, dir, MAX_DISTANCE, FluidCollisionMode.NEVER, true, 0.1, entity -> entity != p);
+        Location target;
+        if (hit != null) {
+            if (hit.getHitBlock() != null) {
+                target = hit.getHitPosition().toLocation(w);
+            } else if (hit.getHitEntity() != null) {
+                target = hit.getHitEntity().getLocation();
+            } else {
+                target = eye.add(dir.multiply(MAX_DISTANCE));
+            }
+        } else {
+            target = eye.add(dir.multiply(MAX_DISTANCE));
+        }
+
+        // Small targeting feedback
+        w.spawnParticle(Particle.CRIT, target, 12, 0.4, 0.4, 0.4, 0.02);
+        w.playSound(p.getLocation(), Sound.ITEM_CROSSBOW_SHOOT, SoundCategory.PLAYERS, 0.8f, 1.1f);
+
+        // Kick off the orbital strike
+        createOrbitalStrike(p, target);
     }
 
-    @EventHandler
-    public void onProjectileHit(ProjectileHitEvent event) {
-        if (!(event.getEntity() instanceof Snowball)) return;
-        Snowball sb = (Snowball) event.getEntity();
-        PersistentDataContainer pdc = sb.getPersistentDataContainer();
-        String shooterUuid = pdc.get(projectileKey, PersistentDataType.STRING);
-        if (shooterUuid == null) return; // not our projectile
+    // === Orbital strike ===
 
-        Location hitLoc = event.getHitEntity() != null ? event.getHitEntity().getLocation() : sb.getLocation();
-        World world = hitLoc.getWorld();
-        if (world == null) return;
+    private void createOrbitalStrike(Player shooter, Location target) {
+        World w = target.getWorld();
+        if (w == null) return;
 
-        // remove the projectile
-        sb.remove();
+        // Scale initial delay with distance for a more “realistic” feel
+        double distance = shooter.getLocation().distance(target);
+        int initialDelay = BASE_DELAY_TICKS + (int) Math.min(100, distance / 2.0);
 
-        // Number of strikes and timing - defaults
-        final int STRIKES = 2;       // how many concentrated explosions
-        final int TICKS_BETWEEN = 8; // ticks between strikes (8 ticks = 0.4s)
-        final double RADIUS = 1.5;   // spread radius for multi-strike pattern
-        final float EXPLOSION_POWER = 15.0f; // explosion strength
+        // Thunder cue before arrival
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            w.playSound(target, Sound.ENTITY_LIGHTNING_BOLT_THUNDER, 5f, 1.0f);
+            w.spawnParticle(Particle.CRIT, target, 60, 0.9, 0.9, 0.9, 0.06);
+        }, initialDelay);
 
-        // Inform shooter if online
-        Player shooter = Bukkit.getPlayer(UUID.fromString(shooterUuid));
-        if (shooter != null) shooter.sendMessage("Orbital strike initiated.");
-
-        // Schedule repeated strikes
-        for (int i = 0; i < STRIKES; i++) {
+        // Fire a volley of projectiles from above build height
+        for (int i = 0; i < getStrikes(shooter); i++) {
             final int index = i;
-            Bukkit.getScheduler().runTaskLater(this, () -> {
-                // small random offset per strike to make it feel dynamic
-                double ox = (Math.random() - 0.5) * RADIUS;
-                double oz = (Math.random() - 0.5) * RADIUS;
-                Location strikeLoc = hitLoc.clone().add(ox, 0, oz);
-                World w = world;
+            new BukkitRunnable() {
+                @Override
+                public void run() {
+                    // Randomize around target for spread
+                    double ox = (Math.random() - 0.5) * 2 * STRIKE_SPREAD;
+                    double oz = (Math.random() - 0.5) * 2 * STRIKE_SPREAD;
 
-                // Beam lifetime (5 seconds, same as BEAM_DURATION_TICKS)
-                final int topY = Math.min(w.getMaxHeight() - 1, strikeLoc.getBlockY() + 256);
+                    double spawnY = w.getMaxHeight() + FALL_HEIGHT_ABOVE_MAX;
+                    Location spawn = new Location(w, target.getX() + ox, spawnY, target.getZ() + oz);
 
-                // 1) Spawn our custom blue beam (display entity)
-                BlockDisplay beam = spawnCustomBeam(strikeLoc, topY, BEAM_RADIUS_BLOCKS, BEAM_MATERIAL);
+                    // FallingBlock projectile as a visible kinetic slug
+                    FallingBlock fb = w.spawnFallingBlock(spawn, PROJECTILE_MATERIAL.createBlockData());
+                    // Prevent placing or dropping items on impact
+                    try {
+                        fb.setCancelDrop(true); // Paper API
+                    } catch (Throwable ignored) {
+                        fb.setDropItem(false);  // Fallback on Spigot
+                    }
+                    fb.setHurtEntities(true);
+                    fb.setDamagePerBlock(0.2f);
 
-                // cue
-                w.playSound(strikeLoc, Sound.BLOCK_BEACON_POWER_SELECT, SoundCategory.BLOCKS, 2.0f, 1.2f);
+                    // Aim at target
+                    Vector vel = target.toVector().subtract(spawn.toVector()).normalize().multiply(PROJECTILE_SPEED + Math.random() * 0.3);
+                    fb.setVelocity(vel);
 
-                // 2) After life: remove beam & big impact
-                new BukkitRunnable() {
-                    @Override
-                    public void run() {
-                        if (beam != null && !beam.isDead()) {
-                            beam.remove();
+                    // Smoke trail while in flight
+                    new BukkitRunnable() {
+                        @Override
+                        public void run() {
+                            if (fb.isDead() || fb.isOnGround()) {
+                                cancel();
+                                return;
+                            }
+                            w.spawnParticle(Particle.SMOKE, fb.getLocation(), 4, 0.18, 0.18, 0.18, 0.01);
+                            w.playSound(fb.getLocation(), Sound.BLOCK_AMETHYST_CLUSTER_PLACE, SoundCategory.AMBIENT, 0.15f, 0.6f + (float) Math.random() * 0.2f);
                         }
+                    }.runTaskTimer(OrbitalStrikePlugin.this, 0L, 2L);
 
-                        // Big impact (with block damage)
-                        w.createExplosion(strikeLoc, EXPLOSION_POWER, false, true);
+                    // Poll for arrival / impact
+                    new BukkitRunnable() {
+                        @Override
+                        public void run() {
+                            if (fb.isDead() || fb.isOnGround() || fb.getLocation().distanceSquared(target) < 4.0) {
+                                Location impact = fb.getLocation();
+                                fb.remove();
 
-                        // randomly set some nearby blocks on fire (about half)
-                        int fireRadius = 3;
-                        for (int dx = -fireRadius; dx <= fireRadius; dx++) {
-                            for (int dz = -fireRadius; dz <= fireRadius; dz++) {
-                                if (Math.random() < 0.5) {
-                                    Location fireLoc = strikeLoc.clone().add(dx, 0, dz);
-                                    if (w.getBlockAt(fireLoc).getType().isAir() && w.getBlockAt(fireLoc.clone().add(0, -1, 0)).getType().isSolid()) {
-                                        w.getBlockAt(fireLoc).setType(Material.FIRE);
+                                // Impact visuals & audio
+                                w.spawnParticle(Particle.EXPLOSION, impact, 1, 0, 0, 0, 0);
+                                w.spawnParticle(Particle.CAMPFIRE_COSY_SMOKE, impact, 20, 0.4, 0.2, 0.4, 0.01);
+                                w.playSound(impact, Sound.ENTITY_GENERIC_EXPLODE, SoundCategory.BLOCKS, 4f, 0.9f);
+
+                                // The actual explosion (configurable damage to blocks)
+                                // Using source == shooter improves knockback consistency on some servers.
+                                w.createExplosion(impact, getExplosionPower(shooter), SET_FIRE, getBlockDamage(shooter), shooter);
+
+                                // Optional entity damage pass (adds reliability across forks)
+                                if (DAMAGE_ENTITIES) {
+                                    double r = DAMAGE_RADIUS;
+                                    for (Entity ent : w.getNearbyEntities(impact, r, r, r)) {
+                                        if (ent instanceof LivingEntity le) {
+                                            if (le.equals(shooter)) continue;
+                                            le.damage(10.0, shooter);
+                                        }
                                     }
                                 }
+
+                                cancel();
                             }
                         }
-
-                        // additional visual + audio
-                        w.spawnParticle(Particle.EXPLOSION, strikeLoc, 1);
-                        w.playSound(strikeLoc, Sound.ENTITY_GENERIC_EXPLODE, SoundCategory.BLOCKS, 4f, 1f);
-                    }
-                }.runTaskLater(this, BEAM_DURATION_TICKS);
-
-            }, i * TICKS_BETWEEN);
+                    }.runTaskTimer(OrbitalStrikePlugin.this, 0L, 1L);
+                }
+            }.runTaskLater(this, initialDelay + index * 6L);
         }
     }
 
-    // === Custom beam implementation (no particles, no real beacons) ===
-    // Uses a single BlockDisplay stretched into a tall translucent column.
+    // === Per-player settings: getters ===
+    private int getStrikes(Player p) {
+        return strikesSetting.getOrDefault(p.getUniqueId(), STRIKES_DEFAULT);
+    }
+    private boolean getBlockDamage(Player p) {
+        return blockDamageSetting.getOrDefault(p.getUniqueId(), BLOCK_DAMAGE_DEFAULT);
+    }
+    private float getExplosionPower(Player p) {
+        return explosionPowerSetting.getOrDefault(p.getUniqueId(), EXPLOSION_POWER_DEFAULT);
+    }
 
-    /**
-     * Spawns a tall blue beam using a BlockDisplay scaled to the desired radius and height.
-     * @param base The base (x,z from this, y is ground level)
-     * @param topY The Y to reach (usually near build height)
-     * @param radiusBlocks Radius in blocks (X/Z)
-     * @param material Translucent material (e.g., BLUE_STAINED_GLASS)
-     * @return The spawned BlockDisplay entity
-     */
-    private BlockDisplay spawnCustomBeam(Location base, int topY, double radiusBlocks, Material material) {
-        World w = base.getWorld();
-        if (w == null) return null;
+    // === GUI for per-player rifle settings ===
+    private static final String GUI_TITLE = ChatColor.DARK_AQUA + "Orbital Rifle Controls";
 
-        int by = base.getBlockY();
-        double height = Math.max(1.0, (topY - by + 1));
-        double diameter = radiusBlocks * 2.0;
+    private void openRifleGui(Player p) {
+        Inventory inv = Bukkit.createInventory(null, 27, GUI_TITLE);
 
-        // Spawn at the center of the target block; we'll scale & translate it up.
-        Location spawnLoc = base.clone().add(0.5, 0, 0.5);
+        // Slot layout:
+        // [ Strikes - ] [ Strikes value ] [ Strikes + ]
+        // [ Explosion - ] [ Explosion value ] [ Explosion + ]
+        // [ BlockDamage toggle ]
 
-        BlockData data = material.createBlockData();
-        BlockDisplay display = w.spawn(spawnLoc, BlockDisplay.class, d -> {
-            d.setBlock(data);
+        // Helper items
+        ItemStack minus = new ItemStack(Material.RED_STAINED_GLASS_PANE);
+        ItemMeta m1 = minus.getItemMeta();
+        if (m1 != null) { m1.setDisplayName(ChatColor.RED + "-" + ChatColor.GRAY + " Decrease"); minus.setItemMeta(m1); }
 
-            // Keep it bright and visible
-            d.setBrightness(new Display.Brightness(15, 15)); // max
-            d.setGlowing(false); // beam is bright enough; toggle to true if you want outline
-            d.setBillboard(Display.Billboard.FIXED);
+        ItemStack plus = new ItemStack(Material.LIME_STAINED_GLASS_PANE);
+        ItemMeta m2 = plus.getItemMeta();
+        if (m2 != null) { m2.setDisplayName(ChatColor.GREEN + "+" + ChatColor.GRAY + " Increase"); plus.setItemMeta(m2); }
 
-            // View range so players can see it from far away
-            d.setViewRange(128.0f);
-            d.setShadowRadius(0f);
-            d.setShadowStrength(0f);
-            d.setTeleportDuration(1); // smooth spawn
+        // Strikes value item
+        ItemStack strikesItem = new ItemStack(Material.CROSSBOW);
+        ItemMeta sMeta = strikesItem.getItemMeta();
+        if (sMeta != null) {
+            sMeta.setDisplayName(ChatColor.AQUA + "Strikes: " + getStrikes(p));
+            strikesItem.setItemMeta(sMeta);
+        }
 
-            // Build a transformation that scales the 1x1x1 "block cube" into a tall column,
-            // then lifts it up by half its height so it starts at ground level.
-            Vector3f scale = new Vector3f((float) diameter, (float) height, (float) diameter);
-            // translation is *local* to the display; lift by half the height
-            Vector3f translation = new Vector3f(0f, (float) (height / 2.0), 0f);
+        // Explosion power value
+        ItemStack powerItem = new ItemStack(Material.GUNPOWDER);
+        ItemMeta pMeta = powerItem.getItemMeta();
+        if (pMeta != null) {
+            pMeta.setDisplayName(ChatColor.AQUA + "Explosion Power: " + getExplosionPower(p));
+            powerItem.setItemMeta(pMeta);
+        }
 
-            Transformation t = new Transformation(
-                    translation,
-                    new AxisAngle4f(0f, 0f, 0f, 1f),
-                    scale,
-                    new AxisAngle4f(0f, 0f, 0f, 1f)
-            );
-            d.setTransformation(t);
+        // Block damage toggle
+        boolean bd = getBlockDamage(p);
+        ItemStack bdItem = new ItemStack(bd ? Material.TNT : Material.BARRIER);
+        ItemMeta bdMeta = bdItem.getItemMeta();
+        if (bdMeta != null) {
+            bdMeta.setDisplayName(ChatColor.GOLD + "Block Damage: " + (bd ? ChatColor.GREEN + "ON" : ChatColor.RED + "OFF"));
+            bdItem.setItemMeta(bdMeta);
+        }
 
-            // Slight fade in/out for polish (optional; safe defaults if unsupported)
-            try {
-                d.setInterpolationDelay(0);
-                d.setInterpolationDuration(5);
-            } catch (NoSuchMethodError ignored) {}
-        });
+        // Place items
+        inv.setItem(10, minus);
+        inv.setItem(11, strikesItem);
+        inv.setItem(12, plus);
 
-        return display;
+        inv.setItem(13, bdItem);
+
+        inv.setItem(14, minus);
+        inv.setItem(15, powerItem);
+        inv.setItem(16, plus);
+
+        p.openInventory(inv);
+    }
+
+    @EventHandler
+    public void onInventoryClick(InventoryClickEvent e) {
+        if (!(e.getWhoClicked() instanceof Player p)) return;
+        if (e.getView() == null || e.getView().getTitle() == null) return;
+        if (!GUI_TITLE.equals(e.getView().getTitle())) return;
+
+        e.setCancelled(true);
+        if (e.getCurrentItem() == null) return;
+        Material type = e.getCurrentItem().getType();
+
+        int slot = e.getRawSlot();
+        UUID id = p.getUniqueId();
+
+        // Strikes - / value / +  in slots 10,11,12
+        if (slot == 10 && type == Material.RED_STAINED_GLASS_PANE) {
+            int v = Math.max(1, getStrikes(p) - 1);
+            strikesSetting.put(id, v);
+            openRifleGui(p);
+            return;
+        }
+        if (slot == 12 && type == Material.LIME_STAINED_GLASS_PANE) {
+            int v = Math.min(24, getStrikes(p) + 1);
+            strikesSetting.put(id, v);
+            openRifleGui(p);
+            return;
+        }
+
+        // Block damage toggle in slot 13
+        if (slot == 13 && (type == Material.TNT || type == Material.BARRIER)) {
+            boolean newVal = !getBlockDamage(p);
+            blockDamageSetting.put(id, newVal);
+            openRifleGui(p);
+            return;
+        }
+
+        // Explosion power - / value / + in slots 14,15,16
+        if (slot == 14 && type == Material.RED_STAINED_GLASS_PANE) {
+            float v = Math.max(0.0f, getExplosionPower(p) - 0.5f);
+            explosionPowerSetting.put(id, v);
+            openRifleGui(p);
+            return;
+        }
+        if (slot == 16 && type == Material.LIME_STAINED_GLASS_PANE) {
+            float v = Math.min(10.0f, getExplosionPower(p) + 0.5f);
+            explosionPowerSetting.put(id, v);
+            openRifleGui(p);
+            return;
+        }
     }
 }
