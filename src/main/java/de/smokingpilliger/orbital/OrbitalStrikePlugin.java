@@ -41,9 +41,9 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
     private final Map<UUID, Long> cooldowns = new HashMap<>();
 
     // === Beam config ===
-    private static final int   BEAM_DURATION_TICKS = 20 * 5; // 5 seconds
-    private static final double BEAM_RADIUS_BLOCKS = 4.0;    // requested radius
-    private static final Material BEAM_MATERIAL = Material.BLUE_STAINED_GLASS; // translucent blue
+    private static final int   BEAM_DURATION_TICKS = 20 * 5;
+    private static final double BEAM_RADIUS_BLOCKS = 4.0;
+    private static final Material BEAM_MATERIAL = Material.LIGHT_BLUE_STAINED_GLASS;
 
     @Override
     public void onEnable() {
@@ -255,6 +255,7 @@ public class OrbitalStrikePlugin extends JavaPlugin implements Listener {
             // Keep it bright and visible
             d.setBrightness(new Display.Brightness(15, 15)); // max
             d.setGlowing(false); // beam is bright enough; toggle to true if you want outline
+            d.setBillboard(Display.Billboard.FIXED);
 
             // View range so players can see it from far away
             d.setViewRange(128.0f);
